@@ -93,6 +93,9 @@ public class TransactionContext {
             if ( !transaction.enlistResource(xaResource) ) {
                 throw new SQLException("Unable to enlist connection in transaction: enlistResource returns 'false'.");
             }
+        } catch (final IllegalStateException e) {
+            // This can happen if the transaction is already timed out
+            throw new SQLException("Unable to enlist connection in the transaction", e);
         } catch (final RollbackException e) {
             // transaction was rolled back... proceed as if there never was a transaction
         } catch (final SystemException e) {

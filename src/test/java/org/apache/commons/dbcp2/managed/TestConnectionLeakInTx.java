@@ -24,11 +24,14 @@ import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 
+import javax.transaction.RollbackException;
 import javax.transaction.Status;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
+
+import static org.junit.Assert.fail;
 
 /**
  * @author <a href="mailto:zfeng@redhat.com>Zheng Feng</a>
@@ -62,7 +65,7 @@ public class TestConnectionLeakInTx {
         mds  = new BasicManagedDataSource();
         mds.setTransactionManager(new TransactionManagerImple());
         mds.setDriverClassName("org.h2.Driver");
-        mds.setUrl("jdbc:h2:mem:test");
+        mds.setUrl("jdbc:h2:mem:test;DB_CLOSE_DELAY=-1");
 
         mds.setMaxTotal(80);
         mds.setMinIdle(0);
@@ -91,7 +94,7 @@ public class TestConnectionLeakInTx {
         PreparedStatement ps = null;
         int i = 0;
 
-        while(i++ < 2) {
+        while(i++ < 200) {
             try {
                 mds.getTransactionManager().setTransactionTimeout(1);
                 mds.getTransactionManager().begin();
@@ -118,8 +121,6 @@ public class TestConnectionLeakInTx {
                         c = mds.getConnection();
                         ps2 = c.prepareStatement(SELECT_STMT);
                         rs = ps2.executeQuery();
-                    } catch (Exception e) {
-
                     } finally {
                         if (rs != null) rs.close();
                         if (ps2 != null) ps2.close();
@@ -127,19 +128,34 @@ public class TestConnectionLeakInTx {
                     }
                 } while (n < 2);
 
-                mds.getTransactionManager().commit();
+                ps.close();
+                ps = null;
+                conn.close();
+                conn = null;
+
+                try {
+                    mds.getTransactionManager().commit();
+                    fail("Should not have been able to commit");
+                } catch (RollbackException e) {
+                    // this is expected
+                    if (mds.getTransactionManager().getTransaction() != null) {
+                        // Need to pop it off the thread if a background thread rolled the transaction back
+                        mds.getTransactionManager().rollback();
+                    }
+                }
             } catch (Exception e) {
-                if (mds.getTransactionManager().getTransaction() != null &&
-                        mds.getTransactionManager().getTransaction().getStatus() == Status.STATUS_ACTIVE) {
+                i--; // we don't want to test for errors that take place before the commit is issued so re-run for this test
+                if (mds.getTransactionManager().getTransaction() != null) {
+                    // Need to pop it off the thread if a background thread rolled the transaction back
                     mds.getTransactionManager().rollback();
                 }
             } finally {
                 if (ps != null) ps.close();
                 if (conn != null) conn.close();
             }
+            Assert.assertEquals(0, mds.getNumActive());
+            System.out.println("Iteration: " + i);
         }
-
-        Assert.assertEquals(0, mds.getNumActive());
     }
 
     @After
