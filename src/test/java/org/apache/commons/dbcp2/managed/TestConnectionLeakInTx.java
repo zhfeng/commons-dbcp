@@ -29,6 +29,7 @@ import javax.transaction.Status;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Timestamp;
 
 import static org.junit.Assert.fail;
@@ -41,6 +42,7 @@ public class TestConnectionLeakInTx {
     private static final String INSERT_STMT = "INSERT INTO TEST_DATA   (KEY, ID, VALUE, INFO, TS) VALUES (?,?,?,?,?)";
 	private static final String SELECT_STMT = "SELECT KEY, ID, VALUE, INFO, TS FROM TEST_DATA LIMIT 1";
 	private static String PAYLOAD;
+    private static final String DROP_STMT = "DROP TABLE TEST_DATA";
 
 	static {
 		StringBuffer sb = new StringBuffer();
@@ -86,6 +88,67 @@ public class TestConnectionLeakInTx {
         ps.execute();
         ps.close();
         conn.close();
+    }
+
+    @Test
+    public void testRepeatedGetConnectionInTimeout() throws Exception {
+        Connection conn = null;
+        mds.getTransactionManager().setTransactionTimeout(1);
+        mds.getTransactionManager().begin();
+
+        try {
+            do {
+                Thread.currentThread().sleep(1000);
+            } while (mds.getTransactionManager().getTransaction().getStatus() != Status.STATUS_ROLLEDBACK);
+            // Let the reaper do it's thing
+            Thread.currentThread().sleep(1000);
+            try {
+                conn = mds.getConnection();
+                fail("Could get connection");
+            } catch (SQLException e) {
+                if (!e.getCause().getClass().equals(IllegalStateException.class)) {
+                    throw e;
+                }
+                try {
+                    conn = mds.getConnection();
+                    fail("Could get connection 2");
+                } catch (SQLException e2) {
+                    if (!e2.getCause().getClass().equals(IllegalStateException.class)) {
+                        throw e2;
+                    }
+                }
+            }
+            if (conn != null) {
+                conn.close();
+            }
+        } finally {
+            mds.getTransactionManager().rollback();
+        }
+    }
+
+    @Test
+    public void testConnCommitAfterTimeout() throws Exception {
+        Connection conn = null;
+
+        try {
+            mds.getTransactionManager().setTransactionTimeout(1);
+            mds.getTransactionManager().begin();
+            conn = mds.getConnection();
+            do {
+                Thread.currentThread().sleep(1000);
+            } while (mds.getTransactionManager().getTransaction().getStatus() != Status.STATUS_ROLLEDBACK);
+            // Let the reaper do it's thing
+            Thread.currentThread().sleep(1000);
+            try {
+                conn.commit();
+                fail("should not work after timeout");
+            } catch (SQLException e) {
+                // Expected
+            }
+            mds.getTransactionManager().rollback();
+        } finally {
+            if (conn != null) conn.close();
+        }
     }
 
     @Test
@@ -160,6 +223,11 @@ public class TestConnectionLeakInTx {
 
     @After
     public void tearDown() throws Exception {
+        Connection conn = mds.getConnection();
+        PreparedStatement ps = conn.prepareStatement(DROP_STMT);
+        ps.execute();
+        ps.close();
+        conn.close();
         if (mds != null) {
             mds.close();
         }

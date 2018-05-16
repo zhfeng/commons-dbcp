@@ -51,6 +51,7 @@ public class ManagedConnection<C extends Connection> extends DelegatingConnectio
     private TransactionContext transactionContext;
     private boolean isSharedConnection;
     private Lock lock;
+    private boolean transactionComplete;
 
     public ManagedConnection(final ObjectPool<C> pool,
             final TransactionRegistry transactionRegistry,
@@ -160,8 +161,8 @@ public class ManagedConnection<C extends Connection> extends DelegatingConnectio
                 try {
                     transactionContext.setSharedConnection(connection);
                 } catch (final SQLException e) {
-                    // transaction is hosed
-                    transactionContext = null;
+                    // transaction is hosed but we can't just unset the transactionContext because it is still the
+                    // active JTA context
                     try {
                         pool.invalidateObject(connection);
                     } catch (final Exception e1) {
@@ -182,19 +183,19 @@ public class ManagedConnection<C extends Connection> extends DelegatingConnectio
             try {
                 // Don't actually close the connection if in a transaction. The
                 // connection will be closed by the transactionComplete method.
-                //
-                // DBCP-484 we need to make sure setClosedInternal(true) being
-                // invoked if transactionContext is not null as this value will
-                // be modified by the transactionComplete method which could run
-                // in the different thread with the transaction calling back.
-                lock.lock();
-                if (transactionContext == null) {
+                if (transactionContext == null) { // DBCP-484 we know that as this connection was not closed it cannot be unset if it was in a TX
                     super.close();
                 }
             } finally {
+                // DBCP-484 we need to make sure setClosedInternal(true) being
+                // invoked if transactionComplete is false as this value will
+                // be modified by the transactionComplete method which could run
+                // in the different thread with the transaction calling back.
                 setClosedInternal(true);
-                lock.unlock();
             }
+            lock.lock();
+            transactionComplete();
+            lock.unlock();
         }
     }
 
@@ -206,18 +207,25 @@ public class ManagedConnection<C extends Connection> extends DelegatingConnectio
     protected class CompletionListener implements TransactionContextListener {
         @Override
         public void afterCompletion(final TransactionContext completedContext, final boolean commited) {
-            lock.lock();
-            try {
-                if (completedContext == transactionContext) {
-                    transactionComplete();
-                }
-            } finally {
+            if (completedContext == transactionContext) {
+                transactionComplete = true;
+                lock.lock();
+                transactionComplete();
                 lock.unlock();
             }
         }
     }
 
-    protected void transactionComplete() {
+    /**
+     * This should be called under try/finally lock of lock object as another thread can update the transactionContext
+     * in parallel
+     */
+    private void transactionComplete() {
+        // Do not try to close the connection until the connection is also closed
+        if (!transactionComplete || !isClosedInternal()) {
+            return;
+        }
+
         // We need to set the transaction context to null here. This may be done by a separate thread provided by the
         // transaction manager so make sure our setting is done under lock
         transactionContext = null;
@@ -245,6 +253,7 @@ public class ManagedConnection<C extends Connection> extends DelegatingConnectio
                 // way to report the error.
             }
         }
+        transactionComplete = false;
     }
 
     //
@@ -253,56 +262,36 @@ public class ManagedConnection<C extends Connection> extends DelegatingConnectio
 
     @Override
     public void setAutoCommit(final boolean autoCommit) throws SQLException {
-        lock.lock();
-        try {
-            if (transactionContext != null) {
-                throw new SQLException("Auto-commit can not be set while enrolled in a transaction");
-            }
-            super.setAutoCommit(autoCommit);
-        } finally {
-            lock.unlock();
+        if (transactionContext != null) {
+            throw new SQLException("Auto-commit can not be set while enrolled in a transaction");
         }
+        super.setAutoCommit(autoCommit);
     }
 
 
     @Override
     public void commit() throws SQLException {
-        lock.lock();
-        try {
-            if (transactionContext != null) {
-                throw new SQLException("Commit can not be set while enrolled in a transaction");
-            }
-            super.commit();
-        } finally {
-            lock.unlock();
+        if (transactionContext != null) {
+            throw new SQLException("Commit can not be set while enrolled in a transaction");
         }
+        super.commit();
     }
 
     @Override
     public void rollback() throws SQLException {
-        lock.lock();
-        try {
-            if (transactionContext != null) {
-                throw new SQLException("Commit can not be set while enrolled in a transaction");
-            }
-            super.rollback();
-        } finally {
-            lock.unlock();
+        if (transactionContext != null) {
+            throw new SQLException("Commit can not be set while enrolled in a transaction");
         }
+        super.rollback();
     }
 
 
     @Override
     public void setReadOnly(final boolean readOnly) throws SQLException {
-        lock.lock();
-        try {
-            if (transactionContext != null) {
-                throw new SQLException("Read-only can not be set while enrolled in a transaction");
-            }
-            super.setReadOnly(readOnly);
-        } finally {
-            lock.unlock();
+        if (transactionContext != null) {
+            throw new SQLException("Read-only can not be set while enrolled in a transaction");
         }
+        super.setReadOnly(readOnly);
     }
 
     //
