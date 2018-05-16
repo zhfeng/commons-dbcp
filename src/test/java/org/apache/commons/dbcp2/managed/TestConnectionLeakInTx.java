@@ -29,6 +29,7 @@ import javax.transaction.Status;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Timestamp;
 
 import static org.junit.Assert.fail;
@@ -86,6 +87,65 @@ public class TestConnectionLeakInTx {
         ps.execute();
         ps.close();
         conn.close();
+    }
+
+    @Test
+    public void testTimeout() throws Exception {
+        Connection conn = null;
+        PreparedStatement ps = null;
+        int i = 0;
+
+        try {
+            mds.getTransactionManager().setTransactionTimeout(1);
+            mds.getTransactionManager().begin();
+
+            conn = mds.getConnection();
+            ps = conn.prepareStatement(INSERT_STMT);
+            ps.setString(1, Thread.currentThread().getName());
+            ps.setLong(2, i);
+            ps.setDouble(3, new java.util.Random().nextDouble());
+            ps.setString(4, PAYLOAD);
+            ps.setTimestamp(5, new Timestamp(System.currentTimeMillis()));
+            ps.execute();
+            ps.close();
+            ps = null;
+
+            do {
+                Thread.currentThread().sleep(1);
+            } while (mds.getTransactionManager().getTransaction().getStatus() != Status.STATUS_ROLLEDBACK);
+
+            try {
+                // Let the reaper do it's thing
+                Thread.currentThread().sleep(1);
+                conn.commit();
+                fail("should not work after timeout");
+            } catch (SQLException e) {
+                // Expected
+                e.printStackTrace();
+            }
+
+            try {
+                mds.getTransactionManager().commit();
+                fail("Should not have been able to commit");
+            } catch (RollbackException e) {
+                // this is expected
+                if (mds.getTransactionManager().getTransaction() != null) {
+                    // Need to pop it off the thread if a background thread rolled the transaction back
+                    mds.getTransactionManager().rollback();
+                }
+            }
+        } catch (Exception e) {
+            i--; // we don't want to test for errors that take place before the commit is issued so re-run for this test
+            if (mds.getTransactionManager().getTransaction() != null) {
+                // Need to pop it off the thread if a background thread rolled the transaction back
+                mds.getTransactionManager().rollback();
+            }
+        } finally {
+            if (ps != null) ps.close();
+            if (conn != null) conn.close();
+        }
+        Assert.assertEquals(0, mds.getNumActive());
+        System.out.println("Iteration: " + i);
     }
 
     @Test
